@@ -354,6 +354,10 @@ pub struct TestArgs {
 }
 
 #[derive(Args, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one bool per command-line flag"
+)]
 pub struct BenchArgs {
     /// Disable INFO-level logging, which otherwise shows uncaught exceptions.
     #[arg(long)]
@@ -378,6 +382,10 @@ pub struct BenchArgs {
     /// Write the results to <path> instead of stdout.
     #[arg(long, value_name = "path")]
     pub output: Option<String>,
+
+    /// Run tail workers, which are otherwise skipped since they add their cost to every request.
+    #[arg(long)]
+    pub trace: bool,
 
     #[arg(value_name = "filter", value_parser = parse_bench_filter)]
     pub filter: Option<BenchFilter>,
@@ -543,6 +551,7 @@ impl BenchArgs {
             case_pattern,
             json: self.format == BenchFormat::Json,
             output: self.output.clone(),
+            trace: self.trace,
         }
     }
 }
