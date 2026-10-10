@@ -1381,6 +1381,10 @@ CompatibilityFlags::Reader compileFlags(const WorkerFactory::Options& options,
     compileCompatibilityFlags(conf.getCompatibilityDate(), conf.getCompatibilityFlags(), flags,
         errorReporter, options.experimental, CompatibilityDateValidation::CODE_VERSION, nullptr,
         isPythonMainModule(conf));
+  } else KJ_IF_SOME(defaultDate, options.defaultCompatibilityDate) {
+    compileCompatibilityFlags(defaultDate, conf.getCompatibilityFlags(), flags, errorReporter,
+        options.experimental, CompatibilityDateValidation::CODE_VERSION, nullptr,
+        isPythonMainModule(conf));
   } else {
     errorReporter.addError(kj::str("Worker must specify compatibilityDate."));
   }

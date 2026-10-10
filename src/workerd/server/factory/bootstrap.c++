@@ -274,6 +274,9 @@ class Bootstrap {
     KJ_IF_SOME(compatDate, benchOptions.compat_date) {
       options.testCompatibilityDateOverride = kj::str(compatDate);
     }
+    KJ_IF_SOME(compatDate, benchOptions.default_compat_date) {
+      options.defaultCompatibilityDate = kj::str(compatDate);
+    }
     options.tailWorkers = benchOptions.trace;
   }
 };
@@ -343,6 +346,10 @@ BuildInfo build_info() {
     .build_mode = buildMode().as<RustCopyUncheckedUtf8>(),
     .v8_version = kj::StringPtr(v8::V8::GetVersion()).as<RustCopyUncheckedUtf8>(),
   };
+}
+
+::rust::String newest_compat_date() {
+  return newestCompatDateStr().as<RustCopyUncheckedUtf8>();
 }
 
 void cli_exit(int32_t code) {
