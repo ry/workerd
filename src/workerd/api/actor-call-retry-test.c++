@@ -306,14 +306,14 @@ KJ_TEST("user-defined retry count excludes the initial attempt") {
 
     uint attemptCount = 1;
     startAttempt(*state);
-    if (policy.maxAttempts == 0) {
+    if (policy.maxRetries == 0) {
       KJ_EXPECT(!state->isRetryEnabled());
       KJ_EXPECT(attemptCount == expectedAttempts);
       KJ_EXPECT(observer->retryCallTypes.size() == 0);
       return;
     }
 
-    for (uint retry = 0; retry < policy.maxAttempts; ++retry) {
+    for (uint retry = 0; retry < policy.maxRetries; ++retry) {
       KJ_EXPECT(handleFailure(*state, makeDisconnect("disconnected"_kj)).is<kj::Duration>());
       startAttempt(*state);
       ++attemptCount;
@@ -321,11 +321,11 @@ KJ_TEST("user-defined retry count excludes the initial attempt") {
 
     KJ_EXPECT(handleFailure(*state, makeDisconnect("disconnected"_kj)).is<kj::Exception>());
     KJ_EXPECT(attemptCount == expectedAttempts);
-    KJ_EXPECT(observer->retryCallTypes.size() == policy.maxAttempts);
+    KJ_EXPECT(observer->retryCallTypes.size() == policy.maxRetries);
   };
 
-  checkAttemptCount(UserDefinedRetryPolicy{.maxAttempts = 0}, 1);
-  checkAttemptCount(UserDefinedRetryPolicy{.maxAttempts = 1}, 2);
+  checkAttemptCount(UserDefinedRetryPolicy{.maxRetries = 0}, 1);
+  checkAttemptCount(UserDefinedRetryPolicy{.maxRetries = 1}, 2);
   checkAttemptCount(UserDefinedRetryPolicy{}, ActorRetryPolicy::systemDefault().maxAttempts());
 }
 

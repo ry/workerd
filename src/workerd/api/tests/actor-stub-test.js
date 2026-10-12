@@ -49,7 +49,7 @@ function checkNullishJurisdiction(env, jurisdiction) {
 }
 
 export default {
-  async test(_request, env, _ctx) {
+  async test(_request, env, ctx) {
     // This test verifies we can still use registered methods like `fetch()`, and also confirms that
     // dynamic names (foo() in this case) can also be called.
     //
@@ -103,6 +103,42 @@ export default {
       let otherObj = env.ns.getByName('foo', { locationHint: 'wnam' });
       assert.deepStrictEqual(obj, otherObj);
       checkDurableObject(otherObj);
+    }
+
+    {
+      // Check that stubs accept a retry policy from both env bindings and ctx.exports, and that
+      // non-numbers and values outside the limits are rejected.
+      const retry = { maxRetries: 2, timeoutMs: 1000 };
+      for (const ns of [env.ns, ctx.exports.DurableObjectExample]) {
+        const otherObj = ns.get(ns.idFromName('foo'), { retry });
+        assert.equal(otherObj.name, 'foo');
+        assert.equal(await otherObj.foo(), 'foo from remote');
+        assert.equal(
+          await ns.getByName('foo', { retry: {} }).foo(),
+          'foo from remote'
+        );
+
+        for (const maxRetries of [-1, 1.5, 10.5, 11]) {
+          assert.throws(() => ns.get(id, { retry: { maxRetries } }), {
+            name: 'RangeError',
+            message: 'retry.maxRetries must be an integer between 0 and 10',
+          });
+        }
+        for (const timeoutMs of [499, 1000.5, 60000.5, 60001]) {
+          assert.throws(() => ns.get(id, { retry: { timeoutMs } }), {
+            name: 'RangeError',
+            message: 'retry.timeoutMs must be an integer between 500 and 60000',
+          });
+        }
+        for (const value of [null, '5', true]) {
+          assert.throws(() => ns.get(id, { retry: { maxRetries: value } }), {
+            name: 'TypeError',
+          });
+          assert.throws(() => ns.get(id, { retry: { timeoutMs: value } }), {
+            name: 'TypeError',
+          });
+        }
+      }
     }
 
     {

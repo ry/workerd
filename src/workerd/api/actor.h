@@ -181,29 +181,23 @@ class DurableObjectNamespace: public jsg::Object {
   // `persistent` indicates whether stubs minted from this namespace may be stored in long-term
   // storage. It is `Persistent::YES` only for `ctx.exports` self-bindings of a worker that has
   // `allow_irrevocable_stub_storage` enabled (see `LoopbackDurableObjectNamespace`); regular env
-  // bindings leave it `Persistent::NO`. `userDefinedRetryPolicy` is the binding's configured retry
-  // policy, applied to minted stubs when user-defined retry policies are enabled; none means the
-  // runtime's default applies.
+  // bindings leave it `Persistent::NO`.
   DurableObjectNamespace(uint channel,
       kj::Own<ActorIdFactory> idFactory,
       ActorCallRetriesAllowed actorCallRetriesAllowed,
-      Persistent persistent,
-      kj::Maybe<UserDefinedRetryPolicy> userDefinedRetryPolicy)
+      Persistent persistent)
       : channel(channel),
         idFactory(kj::mv(idFactory)),
         actorCallRetriesAllowed(actorCallRetriesAllowed),
-        persistent(persistent),
-        userDefinedRetryPolicy(userDefinedRetryPolicy) {}
+        persistent(persistent) {}
   DurableObjectNamespace(IoOwn<ActorChannelFactory> factory,
       kj::Own<ActorIdFactory> idFactory,
       ActorCallRetriesAllowed actorCallRetriesAllowed,
-      Persistent persistent,
-      kj::Maybe<UserDefinedRetryPolicy> userDefinedRetryPolicy)
+      Persistent persistent)
       : channel(kj::mv(factory)),
         idFactory(kj::mv(idFactory)),
         actorCallRetriesAllowed(actorCallRetriesAllowed),
-        persistent(persistent),
-        userDefinedRetryPolicy(userDefinedRetryPolicy) {}
+        persistent(persistent) {}
 
   struct NewUniqueIdOptions {
     // Restricts the new unique ID to a set of colos within a jurisdiction.
@@ -251,7 +245,32 @@ class DurableObjectNamespace: public jsg::Object {
     };
     jsg::Optional<VersionOptions> version;
 
-    JSG_STRUCT(locationHint, routingMode, version);
+    // Limits on how the runtime retries calls through the returned stub. Omitted fields use the
+    // runtime's defaults. Ignored without the `experimental` compatibility flag. With it, always
+    // validated, but applied only while DURABLE_OBJECT_RETRIES_USERLAND is on.
+    //
+    // The fields are non-coercible doubles so that getImpl() can reject fractions and
+    // out-of-range values itself, and non-numbers such as null throw instead of becoming 0.
+    // Integer types would let JSG truncate them first.
+    struct RetryOptions {
+      // Maximum number of retries after the initial attempt, an integer from 0 to 10. Zero
+      // disables retries.
+      jsg::Optional<jsg::NonCoercible<double>> maxRetries;
+      // Time in milliseconds, measured from the start of the call, after which no retry may
+      // start, an integer from 500 to 60000. A retry still running when it expires is cancelled.
+      jsg::Optional<jsg::NonCoercible<double>> timeoutMs;
+      JSG_STRUCT(maxRetries, timeoutMs);
+      JSG_STRUCT_TS_OVERRIDE_DYNAMIC(CompatibilityFlags::Reader flags) {
+        if (flags.getWorkerdExperimental()) {
+          JSG_TS_OVERRIDE(DurableObjectRetryOptions);
+        } else {
+          JSG_TS_OVERRIDE(type DurableObjectRetryOptions = never);
+        }
+      }
+    };
+    jsg::Optional<RetryOptions> retry;
+
+    JSG_STRUCT(locationHint, routingMode, version, retry);
 
     // DurableObjectLocationHint values from https://developers.cloudflare.com/durable-objects/reference/data-location/#provide-a-location-hint
     JSG_STRUCT_TS_DEFINE(
@@ -264,12 +283,14 @@ class DurableObjectNamespace: public jsg::Object {
           locationHint?: DurableObjectLocationHint;
           routingMode?: DurableObjectRoutingMode;
           version?: { cohort?: string };
+          retry?: DurableObjectRetryOptions;
         });
       } else {
         JSG_TS_OVERRIDE({
           locationHint?: DurableObjectLocationHint;
           routingMode?: DurableObjectRoutingMode;
           version: never;
+          retry: never;
         });
       }
     }
@@ -329,8 +350,6 @@ class DurableObjectNamespace: public jsg::Object {
 
   // See doc comment on the constructor.
   Persistent persistent;
-
-  kj::Maybe<UserDefinedRetryPolicy> userDefinedRetryPolicy;
 
   jsg::Ref<DurableObject> getImpl(jsg::Lock& js,
       ActorGetMode mode,
@@ -504,6 +523,7 @@ class DurableObjectClass: public jsg::Object {
   api::ColoLocalActorNamespace, api::DurableObject, api::DurableObjectId,                          \
       api::DurableObjectNamespace, api::DurableObjectNamespace::NewUniqueIdOptions,                \
       api::DurableObjectNamespace::GetDurableObjectOptions, api::DurableObjectClass,               \
-      api::DurableObjectNamespace::GetDurableObjectOptions::VersionOptions
+      api::DurableObjectNamespace::GetDurableObjectOptions::VersionOptions,                        \
+      api::DurableObjectNamespace::GetDurableObjectOptions::RetryOptions
 
 }  // namespace workerd::api

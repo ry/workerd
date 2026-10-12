@@ -13,6 +13,8 @@
 #include <kj/async-io.h>
 #include <kj/test.h>
 
+#include <cmath>
+
 namespace workerd::api {
 namespace {
 
@@ -582,6 +584,25 @@ class MockActorId final: public ActorIdFactory::ActorId {
   }
 };
 
+class MockActorIdFactory final: public ActorIdFactory {
+ public:
+  kj::Own<ActorId> newUniqueId(kj::Maybe<kj::StringPtr>) override {
+    return kj::heap<MockActorId>();
+  }
+  kj::Own<ActorId> idFromName(kj::String) override {
+    return kj::heap<MockActorId>();
+  }
+  kj::Own<ActorId> idFromString(kj::String) override {
+    return kj::heap<MockActorId>();
+  }
+  bool matchesJurisdiction(const ActorId&) override {
+    return true;
+  }
+  kj::Own<ActorIdFactory> cloneWithJurisdiction(kj::Maybe<kj::StringPtr>) override {
+    return kj::heap<MockActorIdFactory>();
+  }
+};
+
 class RecordingActorChannel final: public IoChannelFactory::ActorChannel {
  public:
   RecordingActorChannel(kj::Maybe<IoChannelFactory::ActorRetryRequestMetadata>& capturedMetadata)
@@ -1112,7 +1133,7 @@ KJ_TEST("actor fetch ignores configured retry count while the userland retry gat
   };
 
   KJ_EXPECT(
-      runActorFetch(state, kj::none, ActorFetchKind::HTTP, UserDefinedRetryPolicy{.maxAttempts = 0},
+      runActorFetch(state, kj::none, ActorFetchKind::HTTP, UserDefinedRetryPolicy{.maxRetries = 0},
           UserDefinedRetryPolicyEnabled::DISABLED) != kj::none);
   KJ_EXPECT(state.requestCount == 5);
   KJ_EXPECT(state.retryCount == 4);
@@ -1146,14 +1167,14 @@ KJ_TEST("actor fetch uses the system default retry count when the binding sets n
 KJ_TEST("actor fetch honors the configured retry count") {
   ReplayState attemptsDisabled{.actions = kj::arr(ReplayAction::AMBIGUOUS)};
   KJ_EXPECT(runActorFetch(attemptsDisabled, kj::none, ActorFetchKind::HTTP,
-                UserDefinedRetryPolicy{.maxAttempts = 0},
+                UserDefinedRetryPolicy{.maxRetries = 0},
                 UserDefinedRetryPolicyEnabled::ENABLED) != kj::none);
   KJ_EXPECT(attemptsDisabled.requestCount == 1);
   KJ_EXPECT(attemptsDisabled.retryCount == 0);
 
   ReplayState oneRetry{.actions = kj::arr(ReplayAction::AMBIGUOUS, ReplayAction::AMBIGUOUS)};
   KJ_EXPECT(runActorFetch(oneRetry, kj::none, ActorFetchKind::HTTP,
-                UserDefinedRetryPolicy{.maxAttempts = 1},
+                UserDefinedRetryPolicy{.maxRetries = 1},
                 UserDefinedRetryPolicyEnabled::ENABLED) != kj::none);
   KJ_EXPECT(oneRetry.requestCount == 2);
   KJ_EXPECT(oneRetry.retryCount == 1);
@@ -1165,7 +1186,7 @@ KJ_TEST("configured retry count resets after a redirect") {
   };
 
   KJ_EXPECT(
-      runActorFetch(state, kj::none, ActorFetchKind::HTTP, UserDefinedRetryPolicy{.maxAttempts = 1},
+      runActorFetch(state, kj::none, ActorFetchKind::HTTP, UserDefinedRetryPolicy{.maxRetries = 1},
           UserDefinedRetryPolicyEnabled::ENABLED) == kj::none);
   KJ_EXPECT(state.requestCount == 4);
   KJ_EXPECT(state.retryCount == 2);
@@ -1407,12 +1428,12 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
         ActorGetMode::GET_OR_CREATE, false, ActorRoutingMode::DEFAULT,
         ActorVersion{.cohort = kj::str("cohort")}, ActorCallRetriesAllowed::YES, Persistent::NO,
         UserDefinedRetryPolicy{
-          .maxAttempts = 2,
+          .maxRetries = 2,
           .timeout = 500 * kj::MILLISECONDS,
         });
     KJ_EXPECT(factory.supportsActorCallRetries());
     auto retryPolicy = KJ_ASSERT_NONNULL(factory.getUserDefinedRetryPolicy());
-    KJ_EXPECT(retryPolicy.maxAttempts == 2);
+    KJ_EXPECT(retryPolicy.maxRetries == 2);
     KJ_EXPECT(retryPolicy.timeout == 500 * kj::MILLISECONDS);
 
     auto client = factory.newActorCallAttempt(kj::none,
@@ -1463,6 +1484,98 @@ KJ_TEST("GlobalActorOutgoingFactory forwards metadata and recreates channels for
         ActorGetMode::GET_OR_CREATE, false, ActorRoutingMode::DEFAULT, kj::none,
         ActorCallRetriesAllowed::NO, Persistent::NO, kj::none);
     KJ_EXPECT(!retriesDisallowedFactory.supportsActorCallRetries());
+  });
+}
+
+CompatibilityFlags::Reader makeExperimentalFlags(capnp::MallocMessageBuilder& message) {
+  auto flags = message.initRoot<CompatibilityFlags>();
+  flags.setWorkerdExperimental(true);
+  return flags.asReader();
+}
+
+jsg::NonCoercible<double> num(double value) {
+  return {value};
+}
+
+KJ_TEST("DurableObjectNamespace.get() gives the stub the retry policy it was passed") {
+  using Options = DurableObjectNamespace::GetDurableObjectOptions;
+  capnp::MallocMessageBuilder flagsMessage;
+  TestFixture fixture({.featureFlags = makeExperimentalFlags(flagsMessage)});
+  util::Autogate::initAutogateNamesForTest(
+      {"durable-object-retries-userland"_kj}, util::IgnoreAllAutogatesEnv::YES);
+
+  fixture.runInIoContext([&](const TestFixture::Environment& env) {
+    auto ns = env.js.alloc<DurableObjectNamespace>(static_cast<uint>(1),
+        kj::heap<MockActorIdFactory>(), ActorCallRetriesAllowed::YES, Persistent::NO);
+    auto getWithRetry = [&](Options::RetryOptions retry) {
+      return ns->get(env.js, env.js.alloc<DurableObjectId>(kj::heap<MockActorId>()),
+          Options{.retry = kj::mv(retry)});
+    };
+
+    auto noRetry =
+        ns->get(env.js, env.js.alloc<DurableObjectId>(kj::heap<MockActorId>()), kj::none);
+    KJ_EXPECT(noRetry->getUserDefinedRetryPolicy() == kj::none);
+
+    auto policy = KJ_ASSERT_NONNULL(
+        getWithRetry({.maxRetries = num(0), .timeoutMs = num(500)})->getUserDefinedRetryPolicy());
+    KJ_EXPECT(policy.maxRetries == 0);
+    KJ_EXPECT(policy.timeout == 500 * kj::MILLISECONDS);
+
+    auto limits = KJ_ASSERT_NONNULL(getWithRetry({.maxRetries = num(10), .timeoutMs = num(60000)})
+                                        ->getUserDefinedRetryPolicy());
+    KJ_EXPECT(limits.maxRetries == 10);
+    KJ_EXPECT(limits.timeout == 60 * kj::SECONDS);
+
+    auto defaults = KJ_ASSERT_NONNULL(getWithRetry({})->getUserDefinedRetryPolicy());
+    KJ_EXPECT(defaults.maxRetries == UserDefinedRetryPolicy::DEFAULT_MAX_RETRIES);
+    KJ_EXPECT(defaults.timeout == UserDefinedRetryPolicy::DEFAULT_TIMEOUT);
+
+    for (double maxRetries: {-1.0, 0.5, 10.5, 11.0, std::nan("")}) {
+      KJ_EXPECT_THROW_MESSAGE("retry.maxRetries must be an integer between 0 and 10",
+          getWithRetry({.maxRetries = num(maxRetries)}));
+    }
+    for (double timeoutMs: {499.0, 500.5, 60000.5, 60001.0, std::nan("")}) {
+      KJ_EXPECT_THROW_MESSAGE("retry.timeoutMs must be an integer between 500 and 60000",
+          getWithRetry({.timeoutMs = num(timeoutMs)}));
+    }
+  });
+}
+
+KJ_TEST("DurableObjectNamespace.get() validates but doesn't apply the retry option while the "
+        "userland gate is off") {
+  using Options = DurableObjectNamespace::GetDurableObjectOptions;
+  capnp::MallocMessageBuilder flagsMessage;
+  TestFixture fixture({.featureFlags = makeExperimentalFlags(flagsMessage)});
+  util::Autogate::initAutogateNamesForTest({}, util::IgnoreAllAutogatesEnv::YES);
+
+  fixture.runInIoContext([&](const TestFixture::Environment& env) {
+    auto ns = env.js.alloc<DurableObjectNamespace>(static_cast<uint>(1),
+        kj::heap<MockActorIdFactory>(), ActorCallRetriesAllowed::YES, Persistent::NO);
+    auto getWithRetry = [&](Options::RetryOptions retry) {
+      return ns->get(env.js, env.js.alloc<DurableObjectId>(kj::heap<MockActorId>()),
+          Options{.retry = kj::mv(retry)});
+    };
+
+    KJ_EXPECT(getWithRetry({.maxRetries = num(1)})->getUserDefinedRetryPolicy() == kj::none);
+    KJ_EXPECT_THROW_MESSAGE("retry.maxRetries must be an integer between 0 and 10",
+        getWithRetry({.maxRetries = num(11)}));
+    KJ_EXPECT_THROW_MESSAGE("retry.timeoutMs must be an integer between 500 and 60000",
+        getWithRetry({.timeoutMs = num(0.5)}));
+  });
+}
+
+KJ_TEST("DurableObjectNamespace.get() ignores the retry option without the experimental flag") {
+  using Options = DurableObjectNamespace::GetDurableObjectOptions;
+  TestFixture fixture;
+  util::Autogate::initAutogateNamesForTest(
+      {"durable-object-retries-userland"_kj}, util::IgnoreAllAutogatesEnv::YES);
+
+  fixture.runInIoContext([&](const TestFixture::Environment& env) {
+    auto ns = env.js.alloc<DurableObjectNamespace>(static_cast<uint>(1),
+        kj::heap<MockActorIdFactory>(), ActorCallRetriesAllowed::YES, Persistent::NO);
+    auto stub = ns->get(env.js, env.js.alloc<DurableObjectId>(kj::heap<MockActorId>()),
+        Options{.retry = Options::RetryOptions{.maxRetries = num(11)}});
+    KJ_EXPECT(stub->getUserDefinedRetryPolicy() == kj::none);
   });
 }
 

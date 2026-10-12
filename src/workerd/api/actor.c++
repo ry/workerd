@@ -6,6 +6,7 @@
 
 #include <workerd/io/features.h>
 #include <workerd/io/stored-value.h>
+#include <workerd/util/autogate.h>
 
 #include <capnp/compat/byte-stream.h>
 #include <capnp/compat/http-over-capnp.h>
@@ -14,9 +15,35 @@
 #include <kj/compat/http.h>
 #include <kj/encoding.h>
 
+#include <cmath>
+
 namespace workerd::api {
 
 namespace {
+
+// NaN fails every comparison, so it is rejected too.
+bool isIntegerInRange(double value, double min, double max) {
+  return value >= min && value <= max && value == std::floor(value);
+}
+
+UserDefinedRetryPolicy toUserDefinedRetryPolicy(
+    const DurableObjectNamespace::GetDurableObjectOptions::RetryOptions& options) {
+  using Policy = UserDefinedRetryPolicy;
+  constexpr auto MIN_TIMEOUT_MS = Policy::MIN_CONFIGURABLE_TIMEOUT / kj::MILLISECONDS;
+  constexpr auto MAX_TIMEOUT_MS = Policy::MAX_CONFIGURABLE_TIMEOUT / kj::MILLISECONDS;
+  Policy policy;
+  KJ_IF_SOME(maxRetries, options.maxRetries) {
+    JSG_REQUIRE(isIntegerInRange(maxRetries.value, 0, Policy::MAX_CONFIGURABLE_RETRIES), RangeError,
+        "retry.maxRetries must be an integer between 0 and ", Policy::MAX_CONFIGURABLE_RETRIES);
+    policy.maxRetries = static_cast<uint>(maxRetries.value);
+  }
+  KJ_IF_SOME(timeoutMs, options.timeoutMs) {
+    JSG_REQUIRE(isIntegerInRange(timeoutMs.value, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS), RangeError,
+        "retry.timeoutMs must be an integer between ", MIN_TIMEOUT_MS, " and ", MAX_TIMEOUT_MS);
+    policy.timeout = static_cast<int64_t>(timeoutMs.value) * kj::MILLISECONDS;
+  }
+  return policy;
+}
 
 // This number was arbitrarily chosen, but is meant to account for the cost of holding open outbound
 // actor connections, which do have a real cost and should be accounted for to encourage GC if they
@@ -259,11 +286,20 @@ jsg::Ref<DurableObject> DurableObjectNamespace::getImpl(jsg::Lock& js,
   auto& context = IoContext::current();
   kj::Maybe<kj::String> locationHint;
   kj::Maybe<ActorVersion> version;
+  kj::Maybe<UserDefinedRetryPolicy> retryPolicy;
   KJ_IF_SOME(o, options) {
     locationHint = kj::mv(o.locationHint);
     if (FeatureFlags::get(js).getEnableVersionApi()) {
       KJ_IF_SOME(v, o.version) {
         version = ActorVersion{.cohort = kj::mv(v.cohort)};
+      }
+    }
+    if (FeatureFlags::get(js).getWorkerdExperimental()) {
+      KJ_IF_SOME(r, o.retry) {
+        auto policy = toUserDefinedRetryPolicy(r);
+        if (util::Autogate::isEnabled(util::AutogateKey::DURABLE_OBJECT_RETRIES_USERLAND)) {
+          retryPolicy = policy;
+        }
       }
     }
   }
@@ -275,12 +311,12 @@ jsg::Ref<DurableObject> DurableObjectNamespace::getImpl(jsg::Lock& js,
     KJ_CASE_ONEOF(channelId, uint) {
       outgoingFactory = kj::heap<GlobalActorOutgoingFactory>(channelId, id.addRef(),
           kj::mv(locationHint), mode, enableReplicaRouting, routingMode, kj::mv(version),
-          actorCallRetriesAllowed, persistent, userDefinedRetryPolicy);
+          actorCallRetriesAllowed, persistent, retryPolicy);
     }
     KJ_CASE_ONEOF(channelFactory, IoOwn<ActorChannelFactory>) {
       outgoingFactory = kj::heap<GlobalActorOutgoingFactory>(kj::addRef(*channelFactory),
           id.addRef(), kj::mv(locationHint), mode, enableReplicaRouting, routingMode,
-          kj::mv(version), actorCallRetriesAllowed, persistent, userDefinedRetryPolicy);
+          kj::mv(version), actorCallRetriesAllowed, persistent, retryPolicy);
     }
   }
 
@@ -299,13 +335,13 @@ jsg::Ref<DurableObjectNamespace> DurableObjectNamespace::jurisdiction(
   // inherits the `persistent` bit.
   KJ_SWITCH_ONEOF(channel) {
     KJ_CASE_ONEOF(channelId, uint) {
-      return js.alloc<api::DurableObjectNamespace>(channelId, kj::mv(newIdFactory),
-          actorCallRetriesAllowed, persistent, userDefinedRetryPolicy);
+      return js.alloc<api::DurableObjectNamespace>(
+          channelId, kj::mv(newIdFactory), actorCallRetriesAllowed, persistent);
     }
     KJ_CASE_ONEOF(channelFactory, IoOwn<ActorChannelFactory>) {
       return js.alloc<api::DurableObjectNamespace>(
           IoContext::current().addObject(kj::addRef(*channelFactory)), kj::mv(newIdFactory),
-          actorCallRetriesAllowed, persistent, userDefinedRetryPolicy);
+          actorCallRetriesAllowed, persistent);
     }
   }
 

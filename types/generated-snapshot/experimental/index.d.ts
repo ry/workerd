@@ -693,12 +693,17 @@ interface DurableObjectNamespaceGetDurableObjectOptions {
   version?: {
     cohort?: string;
   };
+  retry?: DurableObjectRetryOptions;
 }
 interface DurableObjectClass<
   _T extends Rpc.DurableObjectBranded | undefined = undefined,
 > {}
 interface DurableObjectNamespaceGetDurableObjectOptionsVersionOptions {
   cohort?: string;
+}
+interface DurableObjectRetryOptions {
+  maxRetries?: number;
+  timeoutMs?: number;
 }
 interface DurableObjectState<Props = unknown> {
   waitUntil(promise: Promise<any>): void;
